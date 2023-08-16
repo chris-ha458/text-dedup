@@ -4,11 +4,15 @@
 # @Author  : Chenghao Mou (mouchenghao@gmail.com)
 import argparse
 import os
+from typing import Any
 from typing import Callable
+from typing import Set
 
 import numpy as np
 from datasets import Dataset
 from datasets import load_dataset
+from multiprocess import Manager
+from multiprocess import shared_memory
 from tqdm import tqdm
 
 from text_dedup import logger
@@ -34,6 +38,13 @@ if __name__ == "__main__":  # pragma: no cover
     NUM_PROC = os.cpu_count()
     timer = Timer()
 
+    def mp_exact_finder(example, idx, hash_dict, flags):
+        h = hash_func(example[args.column].encode("utf-8"))
+        if h in hash_dict:
+            flags[idx] = True
+        else:
+            hash_dict[h] = True
+
     with timer("Total"):
         with timer("Loading"):
             ds: Dataset = load_dataset(  # type: ignore
@@ -57,8 +68,10 @@ if __name__ == "__main__":  # pragma: no cover
         }[args.hash_func]
 
         LEN_DATASET: int = len(ds)
-        hashes = set()
-        flags = []
+        hashes: Set[Any] = set()
+        shm_a = shared_memory.SharedMemory(create=True, size=LEN_DATASET)
+        flags: np.ndarray = np.ndarray(shape=(LEN_DATASET,), dtype=np.bool_, buffer=shm_a.buf)
+        flags[:] = False
 
         with timer("Processing"):
             # currently processing is done on a single thread.
@@ -66,20 +79,14 @@ if __name__ == "__main__":  # pragma: no cover
             # to make multithreaded, would have to handle shared data structs etc.
             # most approaches are not low hanging fruit.
             NUM_SHARDS = int(np.ceil(LEN_DATASET / args.batch_size))
-            for idx in tqdm(range(0, NUM_SHARDS), desc="Processing..."):
-                ds_shard = (
-                    ds.shard(num_shards=NUM_SHARDS, index=idx, contiguous=True)
-                    # TODO .map(either preprocessing like example.encode("utf-8") or multithreaded)
+
+            with Manager() as manager:
+                hash_dict = manager.dict()
+                ds.map(
+                    lambda example, idx: mp_exact_finder(example, idx, hash_dict, flags),
+                    with_indices=True,
+                    num_proc=NUM_PROC,
                 )
-                for example in tqdm(ds_shard[args.column], leave=False):
-                    # moving this byte conversion outside the loop saw no improvement <1 GiB datasets
-                    # might not be worth the added overhead
-                    h = hash_func(example.encode("utf-8"))
-                    if h in hashes:
-                        flags.append(True)
-                    else:
-                        flags.append(False)
-                        hashes.add(h)
 
         with timer("Filtering"):
             # batch size here would be a trade off between memory and speed
@@ -90,6 +97,8 @@ if __name__ == "__main__":  # pragma: no cover
                 num_proc=NUM_PROC,
                 writer_batch_size=args.batch_size,
             )
+        shm_a.close()
+        shm_a.unlink()
 
         with timer("Saving"):
             ds.save_to_disk(args.output)
