@@ -68,7 +68,6 @@ if __name__ == "__main__":  # pragma: no cover
         }[args.hash_func]
 
         LEN_DATASET: int = len(ds)
-        hashes: Set[Any] = set()
         shm_a = shared_memory.SharedMemory(create=True, size=LEN_DATASET)
         flags: np.ndarray = np.ndarray(shape=(LEN_DATASET,), dtype=np.bool_, buffer=shm_a.buf)
         flags[:] = False
@@ -81,12 +80,21 @@ if __name__ == "__main__":  # pragma: no cover
             NUM_SHARDS = int(np.ceil(LEN_DATASET / args.batch_size))
 
             with Manager() as manager:
-                hash_dict = manager.dict()
-                ds.map(
-                    lambda example, idx: mp_exact_finder(example, idx, hash_dict, flags),
-                    with_indices=True,
-                    num_proc=NUM_PROC,
-                )
+                shared_hash_dict = manager.dict()
+                for shard_idx in tqdm(range(0, NUM_SHARDS), desc="Processing..."):
+                    ds_shard = (
+                        ds.shard(num_shards=NUM_SHARDS, index=shard_idx, contiguous=True)
+                        # TODO .map(either preprocessing like example.encode("utf-8") or multithreaded)
+                    )
+                    LEN_SHARD = len(ds_shard)
+                    ds_shard.map(
+                        lambda example, batch_idx: mp_exact_finder(
+                            example, LEN_SHARD * shard_idx + batch_idx, shared_hash_dict, flags
+                        ),
+                        with_indices=True,
+                        num_proc=NUM_PROC,
+                        desc=f"Finding exact hash matches in shard # {(shard_idx + 1)} of {NUM_SHARDS}",
+                    )
 
         with timer("Filtering"):
             # batch size here would be a trade off between memory and speed
