@@ -4,9 +4,7 @@
 # @Author  : Chenghao Mou (mouchenghao@gmail.com)
 import argparse
 import os
-from typing import Any
 from typing import Callable
-from typing import Set
 
 import numpy as np
 from datasets import Dataset
